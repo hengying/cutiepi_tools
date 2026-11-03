@@ -1,0 +1,19 @@
+# Byte-code / caches
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# Virtual envs
+.venv/
+venv/
+
+# Editor / OS noise
+.DS_Store
+*.swp
+*~
+
+# Build output of the optional overlay indicator
+cutiepi-hud/src/overlay/hud-overlay
+
+# Local logs produced by the daemon when run in the foreground
+*.log
