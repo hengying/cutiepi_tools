@@ -41,5 +41,5 @@ First public release.
   detected from the Pi side (the button is wired to the microcontroller).
 - Default rotation angles were measured on a CutiePi CM4; other panel mountings
   may need `rotate-flip` or `rotate-calibrate`.
-- On-screen strings and console messages are in Chinese; the documentation is in
-  English.
+- On-screen strings and console messages are in Chinese; the documentation is
+  bilingual (`README.md` English, `README.zh-CN.md` Chinese).

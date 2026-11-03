@@ -1,5 +1,7 @@
 # cutiepi_tools
 
+**Language:** English | [中文](README.zh-CN.md)
+
 A small, self-contained toolkit for the **CutiePi CM4 tablet** running a stock
 **Raspberry Pi OS** (no `cutiepi_shell`). It brings back the tablet behaviours the
 official image had, using only stock system components:
@@ -289,6 +291,7 @@ Logs: `~/cutiepi-hud.log` (state changes only), rotated weekly by
 ```
 .
 ├── README.md                    ← this file
+├── README.zh-CN.md              ← Chinese version
 ├── CHANGELOG.md
 ├── LICENSE                      ← MIT
 ├── configs/
