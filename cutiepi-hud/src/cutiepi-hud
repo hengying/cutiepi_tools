@@ -1,0 +1,8 @@
+#!/bin/sh
+# cutiepi-hud 启动器（安装到 /usr/local/bin/cutiepi-hud）
+LIB="/opt/cutiepi-hud/lib"
+if [ -d "$LIB" ]; then
+    PYTHONPATH="$LIB${PYTHONPATH:+:$PYTHONPATH}"
+    export PYTHONPATH
+fi
+exec /usr/bin/python3 -m cutiepi_hud "$@"

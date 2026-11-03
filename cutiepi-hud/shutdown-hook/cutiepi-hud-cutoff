@@ -1,0 +1,57 @@
+#!/usr/bin/python3
+# -*- coding: utf-8 -*-
+"""systemd 关机钩子：通知 MCU 真正切断电池供电。
+
+放在 /usr/lib/systemd/system-shutdown/ 下，由 systemd 在系统即将断电时执行，
+参数是 poweroff / reboot / halt / kexec。reboot 时不切电（否则会直接断电变关机）。
+
+对应 002_资料/cutiepi-middleware-master/cutoff：发送 type=5, payload=0xF7 的帧。
+"""
+
+import os
+import sys
+import time
+
+LIB = "/opt/cutiepi-hud/lib"
+if LIB not in sys.path:
+    sys.path.insert(0, LIB)
+
+try:
+    from cutiepi_hud import mcu, serialport
+except Exception:  # 库没装好也不要阻塞关机
+    sys.exit(0)
+
+
+def main():
+    verb = sys.argv[1] if len(sys.argv) > 1 else "poweroff"
+    if verb == "reboot":
+        return 0
+
+    dry_run = os.environ.get("CUTIEPI_HUD_CUTOFF_DRYRUN") == "1"
+    frame = mcu.cutoff_frame()
+    if dry_run:
+        print("cutoff frame=%s ports=%s" % (frame.hex(), ",".join(serialport.candidate_ports()) or "none"))
+        return 0
+
+    for port in serialport.candidate_ports():
+        try:
+            fd = serialport.open_port(port, 115200)
+        except OSError:
+            continue
+        try:
+            for _ in range(3):
+                os.write(fd, frame)
+                time.sleep(0.05)
+        except OSError:
+            pass
+        finally:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+        return 0
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

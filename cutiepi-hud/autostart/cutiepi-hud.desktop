@@ -1,0 +1,13 @@
+[Desktop Entry]
+Type=Application
+Name=CutiePi HUD
+Name[zh_CN]=CutiePi 屏幕旋转与电池指示
+Comment=Auto rotate the screen and show battery in the system tray
+Comment[zh_CN]=根据摆放方向自动旋转屏幕，并在系统状态栏显示电池电量与充电状态
+# 通过 systemd 用户单元启动：这样 systemctl --user restart cutiepi-hud 能管到它，
+# 日志也统一进 journal。单元本身是 enabled 的，这条只是兜底。
+Exec=/usr/bin/systemctl --user start cutiepi-hud
+Terminal=false
+NoDisplay=true
+X-GNOME-Autostart-enabled=true
+X-GNOME-Autostart-Delay=1

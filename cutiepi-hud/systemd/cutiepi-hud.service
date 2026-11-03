@@ -1,0 +1,20 @@
+[Unit]
+Description=CutiePi HUD（屏幕自动旋转 + 状态栏电池指示）
+Documentation=file:/opt/cutiepi-hud/README.md
+# 只是"别太早启动"：桌面没起来时守护进程自己会等 socket
+After=graphical-session.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/cutiepi-hud run
+Restart=on-failure
+RestartSec=5
+Environment=PYTHONUNBUFFERED=1
+# 日志同时写到文件：断电/异常退出后 journal 可能丢失，这个文件能留证据
+StandardOutput=append:%h/cutiepi-hud.log
+StandardError=append:%h/cutiepi-hud.log
+
+[Install]
+# 树莓派 OS 上 graphical-session.target 并不会被启动，所以挂在 default.target：
+# 登录后就会跑，桌面还没起来时程序自己会等。
+WantedBy=default.target

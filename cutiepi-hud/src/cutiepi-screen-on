@@ -1,0 +1,6 @@
+#!/bin/sh
+# 打开屏幕背光（供其它程序调用）
+#   用法：cutiepi-screen-on         # 亮屏（重复调用无副作用）
+#         cutiepi-screen-off        # 关屏
+#         cutiepi-hud screen on|off|toggle|status   # 同一套功能
+exec /usr/local/bin/cutiepi-hud screen on "$@"

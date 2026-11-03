@@ -1,0 +1,10 @@
+# CutiePi HUD：让 MCU 串口（/dev/ttyS0）可以被 dialout 组读写
+#
+# 树莓派 OS 13 (trixie) 上 /dev/ttyS0 默认是 600 root:root，
+# 普通用户（即使已在 dialout 组）也打不开，MCU 电量就读不到。
+# 这条规则排在 /lib/udev/rules.d 之后生效，把权限改成 0660 dialout。
+# 手动立刻生效（不用重启）：
+#   sudo udevadm control --reload-rules && sudo udevadm trigger --subsystem-match=tty
+SUBSYSTEM=="tty", KERNEL=="ttyS0", GROUP="dialout", MODE="0660"
+SUBSYSTEM=="tty", KERNEL=="ttyAMA1", GROUP="dialout", MODE="0660"
+SUBSYSTEM=="tty", KERNEL=="ttyAMA0", GROUP="dialout", MODE="0660"
