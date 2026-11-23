@@ -36,6 +36,8 @@ All notable changes to this project are documented here.
   (`cutiepi-panel`) and gyro (`mpu6050-i2c5`) overlays on a fresh OS, and disable the
   phantom `HDMI2` output in the display settings if the desktop/taskbar looks wrong
   (content contributed as `after_OS_installed.md`, merged into the READMEs).
+- The tool-level `cutiepi-hud/README.md` was refreshed as well: it now carries the
+  step 0 note, the rotation-lock commands, the new modules and the updated test count.
 
 ## v1.3.1 — 2026-11-03
 
