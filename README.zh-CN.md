@@ -89,6 +89,26 @@
 
 ## 安装
 
+### 第 0 步：刚装完系统，先启用显示和陀螺仪驱动
+
+装完最新的 Raspberry Pi OS 之后，要先启用**显示**和**陀螺仪（IMU）**这两个"驱动"——
+在这块板子上它们就是 `config.txt` 里的设备树叠加层（overlay），完整可用的文件在
+[`configs/config.txt`](configs/config.txt)：
+
+```ini
+dtoverlay=cutiepi-panel             # 显示（DSI 面板）
+dtoverlay=i2c5,pins_10_11           # 陀螺仪用的 I2C 总线
+dtoverlay=mpu6050-i2c5,interrupt=27 # 陀螺仪/加速度计，自动旋转靠它
+```
+
+没有 `cutiepi-panel` 面板就不亮；没有 `mpu6050-i2c5`，`cutiepi-hud monitor` 会报"没有加速度计"。
+
+如果桌面或面板显示不正常（多出一个虚拟输出、任务栏画在奇怪的位置）：
+**在桌面空白处右键 → 打开显示设置对话框 → 把 `HDMI2` 那个输出禁用 → 重启**，
+桌面和菜单就恢复正常了。
+
+> 这段说明也单独存了一份：[`after_OS_installed.md`](after_OS_installed.md)。
+
 ### 依赖
 
 ```bash

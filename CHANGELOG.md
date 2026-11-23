@@ -30,6 +30,13 @@ All notable changes to this project are documented here.
 - New configuration keys: `hud/rotation_icon`, `rotation/locked`, `rotation/last_angle`.
 - Tests: 275 → 326 checks.
 
+### Documentation
+
+- Both READMEs now start the install with a **step 0**: enable the display
+  (`cutiepi-panel`) and gyro (`mpu6050-i2c5`) overlays on a fresh OS, and disable the
+  phantom `HDMI2` output in the display settings if the desktop/taskbar looks wrong
+  (content contributed as `after_OS_installed.md`, merged into the READMEs).
+
 ## v1.3.1 — 2026-11-03
 
 ### Added

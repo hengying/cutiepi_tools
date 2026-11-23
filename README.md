@@ -96,6 +96,30 @@ physically disconnected.
 
 ## Install
 
+### Step 0 — after a fresh OS: enable the display and gyro drivers
+
+After installing the latest Raspberry Pi OS you must first enable the **display** and
+the **gyro (IMU)** "drivers". On this board they are device-tree overlays in
+`config.txt`; the complete working file is in
+[`configs/config.txt`](configs/config.txt):
+
+```ini
+dtoverlay=cutiepi-panel             # display (DSI panel)
+dtoverlay=i2c5,pins_10_11           # I2C bus for the IMU
+dtoverlay=mpu6050-i2c5,interrupt=27 # gyro / accelerometer used for rotation
+```
+
+Without `cutiepi-panel` there is no picture on the tablet panel; without
+`mpu6050-i2c5` `cutiepi-hud monitor` reports "no accelerometer".
+
+Then, if the desktop or the panel looks wrong (a phantom extra output appears and the
+taskbar is drawn in the wrong place): **right-click the desktop → open the display
+settings dialog → disable the `HDMI2` output → reboot**. The desktop and the menu then
+look normal.
+
+> The same note is also available as a standalone file:
+> [`after_OS_installed.md`](after_OS_installed.md).
+
 ### Requirements
 
 ```bash
