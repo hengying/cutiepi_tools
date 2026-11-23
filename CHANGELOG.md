@@ -2,6 +2,40 @@
 
 All notable changes to this project are documented here.
 
+## v1.4.2 — 2026-11-23
+
+### Added
+
+- **Rotation lock in the system tray.** A third icon toggles between *follow gravity*
+  (black circular arrow) and *locked* (grey arrow with a black slash over it, i.e. the
+  classic "disabled" symbol). While locked the orientation is frozen; if something else
+  changes the output transform the daemon corrects it within 5 seconds. Switching back
+  to *allowed* applies the current posture immediately instead of waiting for movement.
+- The lock flag and the last applied angle are stored in the user config
+  (`[rotation] locked` / `last_angle`). The angle is written on **every** successful
+  rotation (plus once at exit), so a power cut does not lose it.
+- On login the autostart entry runs `cutiepi-hud rotate-apply-saved` before starting
+  the daemon, so the first frame already shows the orientation you left with.
+- New commands: `rotate-lock [on|off|toggle|status]`, `rotate-apply-saved`.
+- Toggling the icon shows a **2.5-second desktop notification** ("rotation disabled" /
+  "rotation enabled"). Tray `ToolTip` stays permanently empty: on a touch screen the
+  panel never gets a pointer-leave event, so a tooltip bubble would stay on screen
+  forever and keep showing stale text. A self-drawn bubble (`toast.py`) is the fallback
+  when no notification daemon is running.
+- `write_user_overrides()` now takes a file lock and replaces the config atomically, so
+  the daemon writing `last_angle` cannot race with `calibrate`.
+
+### Changed
+
+- New configuration keys: `hud/rotation_icon`, `rotation/locked`, `rotation/last_angle`.
+- Tests: 275 → 326 checks.
+
+## v1.3.1 — 2026-11-03
+
+### Added
+
+- Chinese README (`README.zh-CN.md`), with a language switcher at the top of both files.
+
 ## v1.3.0 — 2026-11-03
 
 First public release.

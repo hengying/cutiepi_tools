@@ -7,6 +7,8 @@ A small, self-contained toolkit for the **CutiePi CM4 tablet** running a stock
 official image had, using only stock system components:
 
 * **automatic screen rotation** based on how you hold the tablet,
+* **rotation lock in the system tray** — one tap freezes the orientation, the state
+  and the current angle survive a reboot,
 * **battery percentage + charging state in the system tray** (not a floating window),
 * **a brightness tray icon** with a 1–15 slider,
 * **power button handling** — short press = screen on/off, double press = shutdown
@@ -22,6 +24,8 @@ official image had, using only stock system components:
 
 <p align="center">
   <img src="docs/screenshots/tray-icons.png" alt="Battery and brightness icons in the system tray" height="34">
+  &nbsp;&nbsp;
+  <img src="docs/screenshots/rotation-lock-icons.png" alt="Rotation enabled / locked icons" height="34">
 </p>
 
 ---
@@ -47,12 +51,19 @@ official image had, using only stock system components:
 | Feature | How it shows up | Implementation |
 |---|---|---|
 | **Auto-rotate** in all four orientations | Screen turns with the tablet | MPU6050 read from IIO sysfs → posture with hysteresis → `wlr-randr` (Wayland) or `xrandr` + touch matrix (X11) |
+| **Rotation lock** | Black circular arrow = following gravity; grey arrow with a black slash = locked (orientation frozen) | Third SNI item; the lock flag and the last angle live in the user config, so both survive a reboot |
 | **Battery + charging in the tray** | A number icon (`87`) in the panel, green while charging, tooltip `Battery 87% · Charging` | MCU serial protocol over `/dev/serial0` → StatusNotifierItem (SNI) tray icon drawn by us |
 | **Brightness in the tray** | Sun icon, click → slider 1–15 | Second SNI item in its own process; writes `/sys/class/backlight/*/brightness` |
 | **Screen on/off** | Short press of the power button | Writes `bl_power` |
 | **Shutdown confirmation** | Full-screen dialog with *Cancel / Shut down* | Double press of the power button, or the MCU's 6-second request |
 | **Real power-off** | Battery is physically disconnected at the end of a shutdown | `systemd` shutdown hook sends the MCU cutoff frame |
 | **Diagnostics** | `cutiepi-hud diagnose` prints everything that matters | — |
+
+<p align="center">
+  <img src="docs/screenshots/rotation-lock-icons.png" alt="Rotation enabled vs locked" width="330"><br>
+  <em>Rotation lock — left: enabled (black arrow); right: locked (grey arrow + slash).
+  Tapping the icon toggles it and shows a 2.5-second notification, then nothing.</em>
+</p>
 
 <p align="center">
   <img src="docs/screenshots/brightness-slider.png" alt="Brightness slider" width="560"><br>
@@ -168,6 +179,13 @@ cutiepi-hud calibrate                     # calibrate axes -> posture
 cutiepi-hud rotate-calibrate              # calibrate posture -> rotation angle
 cutiepi-hud rotate-flip                   # flip all four orientations by 180°
 
+# ---- rotation lock ----
+cutiepi-hud rotate-lock                   # print state + last angle
+cutiepi-hud rotate-lock on                # freeze the orientation
+cutiepi-hud rotate-lock off               # follow gravity again
+cutiepi-hud rotate-lock toggle            # what tapping the tray icon does
+cutiepi-hud rotate-apply-saved            # re-apply the saved angle (autostart does this first)
+
 # ---- screen ----
 cutiepi-screen-off                        # backlight off
 cutiepi-screen-on                         # backlight on
@@ -210,6 +228,9 @@ The most interesting keys:
 | `hud/icon_style` | `number` | `number` (digits drawn in the icon) or `battery` |
 | `hud/icon_color` | `auto` | Follow the GTK theme; force with `light` / `dark` |
 | `hud/brightness_icon` | `true` | Show the brightness (sun) tray icon |
+| `hud/rotation_icon` | `true` | Show the rotation-lock tray icon |
+| `rotation/locked` | `false` | Rotation frozen? Written by the tray icon / `rotate-lock` |
+| `rotation/last_angle` | `-1` | Last applied angle; written by the daemon on every rotation |
 
 Non-default values used on the reference tablet are documented in
 `cutiepi-hud/src/cutiepi-hud.conf`.
@@ -255,8 +276,31 @@ systemd --user: cutiepi-hud run
 ├── thread  tray       : SNI item      → battery icon (digits drawn by us)
 ├── proc    brightness_tray : second SNI item (own D-Bus connection) → sun icon
 │     └── proc  brightness_popup : GTK slider, writes brightness
+├── proc    rotation_tray   : third SNI item → rotation-lock icon
+│     └── hint : 2.5 s desktop notification on toggle
 └── proc    hud-overlay (optional) : fallback indicator if the panel has no tray
 ```
+
+### Rotation lock and boot restore
+
+* The lock flag and the last applied angle are stored in the **user config**
+  (`[rotation] locked` / `last_angle`), so both survive a reboot. The daemon
+  compares the file every second, so a tap takes effect within ~1 s.
+* The angle is written on **every** successful rotation, not only at shutdown —
+  a power cut or a 10-second button hold does not lose it. The daemon also writes
+  it once more when it exits.
+* At login the autostart entry runs `cutiepi-hud rotate-apply-saved` *first*
+  (plain `wlr-randr`, a few hundred milliseconds) so the very first frame is the
+  orientation you left. The daemon then continues according to the lock flag:
+  frozen → keep it, unlocked → follow gravity.
+* While frozen the daemon re-checks the real output transform every 5 s and
+  corrects it if something else changed it. Switching back to "allowed" applies
+  the current posture immediately instead of waiting for the tablet to move.
+* The icon's StatusNotifierItem **tooltip is permanently empty**: on a touch
+  screen the panel never receives a "pointer left" event, so a tooltip bubble
+  stays on screen forever and keeps showing stale text. Feedback on a toggle is
+  a 2.5-second desktop notification instead (`notify.py`), with a small
+  self-drawn bubble (`toast.py`) as a fallback when no notification daemon runs.
 
 A few details that took the longest to get right, all documented in
 [`docs/protocol.md`](docs/protocol.md):
@@ -307,7 +351,7 @@ Logs: `~/cutiepi-hud.log` (state changes only), rotated weekly by
     │   ├── cutiepi-hud.conf     ← fully commented default config
     │   └── cutiepi_hud/         ← Python modules
     ├── systemd/  udev/  sudoers/  autostart/  shutdown-hook/
-    └── tests/                   ← 275 pure-logic checks, runnable on any machine
+    └── tests/                   ← 326 pure-logic checks, runnable on any machine
 ```
 
 Run the tests without a tablet:
@@ -330,6 +374,9 @@ python3 tests/run_tests.py
   behaviour and cannot be intercepted.
 * The rotation angles in the default config were measured on one CutiePi CM4;
   panels mounted differently may need `rotate-flip` or `rotate-calibrate`.
+* **Tray icons have no tooltips on purpose.** On a touch screen the panel shows a
+  tooltip bubble that never disappears (there is no pointer-leave event), so this
+  project keeps `ToolTip` empty and reports state changes with a short notification.
 * X11 support (`xrandr` + `xinput` touch matrix) is implemented but was only
   exercised on the X11 fallback, not on a full session.
 

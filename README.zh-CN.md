@@ -7,6 +7,7 @@
 
 * 按摆放方向**自动旋转屏幕**；
 * **在系统状态栏里**显示电量和充电状态（不是独立窗口）；
+* **状态栏旋转锁定**——点一下冻结当前方向，锁定状态和当前角度都跨重启保留；
 * 状态栏上的**亮度图标**，点开是 1–15 的滑块；
 * **电源键处理**——短按开关屏幕、连按两下弹关机确认框、按住 6 秒响应 MCU 的关机请求
   （同样弹确认框）；
@@ -18,6 +19,8 @@
 
 <p align="center">
   <img src="docs/screenshots/tray-icons.png" alt="状态栏里的电量和亮度图标" height="34">
+  &nbsp;&nbsp;
+  <img src="docs/screenshots/rotation-lock-icons.png" alt="允许旋转 / 禁止旋转 图标" height="34">
 </p>
 
 ---
@@ -43,12 +46,19 @@
 | 功能 | 表现 | 实现方式 |
 |---|---|---|
 | **四方向自动旋转** | 屏幕跟着平板转 | 从 IIO sysfs 读 MPU6050 → 姿态判定（带迟滞）→ `wlr-randr`（Wayland）或 `xrandr` + 触摸矩阵（X11） |
+| **旋转锁定** | 黑色循环箭头=跟随重力；灰色箭头+黑斜线=已锁定（方向冻结） | 第三个 SNI 图标；锁定状态与上次角度存在用户配置里，跨重启保留 |
 | **状态栏电量与充电** | 面板里一个数字图标（`87`），充电时变绿，悬停显示 `电池 87% · 充电中` | MCU 串口协议（`/dev/serial0`）→ 自己绘制的 StatusNotifierItem（SNI）托盘图标 |
 | **状态栏亮度** | 太阳图标，点击弹出 1–15 滑块 | 独立进程里的第二个 SNI 图标；直接写 `/sys/class/backlight/*/brightness` |
 | **息屏 / 亮屏** | 短按电源键 | 写 `bl_power` |
 | **关机确认** | 全屏对话框，含「取消 / 关机」 | 连按两下电源键，或响应 MCU 的 6 秒请求 |
 | **真正断电** | 关机结束时电池被物理断开 | `systemd` 关机钩子给 MCU 发送断电帧 |
 | **诊断** | `cutiepi-hud diagnose` 打印所有关键信息 | — |
+
+<p align="center">
+  <img src="docs/screenshots/rotation-lock-icons.png" alt="允许旋转 vs 禁止旋转" width="330"><br>
+  <em>旋转锁定——左：允许（黑色箭头）；右：禁止（灰色箭头 + 黑斜线）。
+  点图标切换，切换时弹一条 2.5 秒的提示，之后不再显示任何内容。</em>
+</p>
 
 <p align="center">
   <img src="docs/screenshots/brightness-slider.png" alt="亮度滑块" width="560"><br>
@@ -160,6 +170,13 @@ cutiepi-hud calibrate                     # 标定"轴 -> 姿态"
 cutiepi-hud rotate-calibrate              # 标定"姿态 -> 旋转角度"
 cutiepi-hud rotate-flip                   # 四个方向整体翻 180°
 
+# ---- 旋转锁定 ----
+cutiepi-hud rotate-lock                   # 打印状态 + 上次方向
+cutiepi-hud rotate-lock on                # 禁止旋转（冻结当前方向）
+cutiepi-hud rotate-lock off               # 允许旋转（跟随重力）
+cutiepi-hud rotate-lock toggle            # 等价于点状态栏图标
+cutiepi-hud rotate-apply-saved            # 按上次方向应用一次（开机自启先调它）
+
 # ---- 屏幕 ----
 cutiepi-screen-off                        # 关屏
 cutiepi-screen-on                         # 亮屏
@@ -202,6 +219,9 @@ cutiepi-hud power-dialog                  # 预览关机确认框
 | `hud/icon_style` | `number` | `number`（数字画进图标）或 `battery` |
 | `hud/icon_color` | `auto` | 跟随 GTK 主题；可强制 `light` / `dark` |
 | `hud/brightness_icon` | `true` | 是否显示亮度（太阳）图标 |
+| `hud/rotation_icon` | `true` | 是否显示旋转锁定图标 |
+| `rotation/locked` | `false` | 是否禁止旋转；由图标/命令写入 |
+| `rotation/last_angle` | `-1` | 上次生效的角度；守护进程每次转屏自动写入 |
 
 参考机上用到的非默认值都写在 `cutiepi-hud/src/cutiepi-hud.conf` 的注释里。
 
@@ -244,8 +264,24 @@ systemd --user: cutiepi-hud run
 ├── 线程  tray       : SNI 图标      → 电池图标（数字由我们绘制）
 ├── 进程  brightness_tray : 第二个 SNI 图标（独立 D-Bus 连接）→ 太阳图标
 │     └── 进程  brightness_popup : GTK 滑块，写入亮度
+├── 进程  rotation_tray   : 第三个 SNI 图标 → 旋转锁定图标
+│     └── 提示 : 切换时弹 2.5 秒桌面通知
 └── 进程  hud-overlay（可选）: 面板没有托盘时的备用角标
 ```
+
+### 旋转锁定与开机恢复
+
+* 锁定状态和上次生效的角度都存在**用户配置**（`[rotation] locked` / `last_angle`），
+  重启不丢；守护进程每秒比对一次文件，点图标 1 秒内生效。
+* 角度是在**每次成功转屏时**写盘的（不是等到关机才写），断电/按住 10 秒硬切都不会丢；
+  守护进程退出前还会再补写一次。
+* 开机时 autostart 先跑 `cutiepi-hud rotate-apply-saved`（纯 `wlr-randr`，几百毫秒），
+  让**第一帧**就是上次的方向；随后守护进程按锁定状态继续——锁住就保持，允许就跟随重力。
+* 锁定期间每 5 秒校验一次实际 transform，被别的程序改了就纠回；切回"允许"时
+  立即按当前姿态纠正，不用等平板转动。
+* 图标的 StatusNotifierItem **ToolTip 永久为空**：触摸屏没有"指针离开"事件，
+  面板弹的 tooltip 气泡会一直挂着显示旧内容。切换反馈改用**2.5 秒的桌面通知**
+  （`notify.py`），没有通知服务时退化成自绘小气泡（`toast.py`）。
 
 最花时间的几个细节都写在 [`docs/protocol.md`](docs/protocol.md)：
 
@@ -295,7 +331,7 @@ systemd --user: cutiepi-hud run
     │   ├── cutiepi-hud.conf     ← 带完整注释的默认配置
     │   └── cutiepi_hud/         ← Python 模块
     ├── systemd/  udev/  sudoers/  autostart/  shutdown-hook/
-    └── tests/                   ← 275 项纯逻辑测试，任意机器可跑
+    └── tests/                   ← 326 项纯逻辑测试，任意机器可跑
 ```
 
 不需要平板就能跑测试：
@@ -315,6 +351,8 @@ python3 tests/run_tests.py
 * **按住 10 秒会硬断电**，这是 MCU 自己的行为，无法拦截。
 * 默认旋转角度是在一台 CutiePi CM4 上实测的，面板装配方式不同时可能需要
   `rotate-flip` 或 `rotate-calibrate`。
+* **托盘图标故意不带 tooltip**：触摸屏上面板弹出的 tooltip 气泡不会消失
+  （没有"指针离开"事件），所以 ToolTip 永久留空，状态变化用 2.5 秒的桌面通知提示。
 * X11 路径（`xrandr` + `xinput` 触摸矩阵）已实现，但只在 X11 兜底场景验证过，
   没有完整 X11 会话实测。
 
