@@ -812,6 +812,226 @@ def test_brightness():
     eq(len(provider._pixels()), 32 * 32, "亮度和电池图标互不干扰")
 
 
+def _rotation_state_path(name):
+    if not os.path.isdir(TEMP_ROOT):
+        os.makedirs(TEMP_ROOT)
+    path = os.path.join(TEMP_ROOT, name)
+    for suffix in ("", ".tmp", ".lock"):
+        if os.path.exists(path + suffix):
+            try:
+                os.remove(path + suffix)
+            except OSError:
+                pass
+    return path
+
+
+def test_rotation_state():
+    print("[lock] 锁定状态与上次角度的读写")
+    from cutiepi_hud import lockstate
+
+    path = _rotation_state_path("rotation-state.ini")
+    store = lockstate.RotationState(user_path=path)
+
+    eq(store.read(), (None, None), "文件不存在时两项都是 None")
+    store.set_locked(True)
+    eq(store.read(), (True, None), "写入锁定状态")
+    store.set_angle(270)
+    eq(store.read(), (True, 270), "写入角度")
+    store.set_locked(False)
+    eq(store.read(), (False, 270), "只改锁定、不动角度")
+    store.set_angle(45)
+    eq(store.read()[1], 270, "非法角度被忽略")
+    check(not os.path.exists(path + ".tmp"), "不留下临时文件")
+
+    # 写入时不能弄丢别的段
+    config_module.write_user_overrides({"display": {"swap_lr": False}}, path)
+    store.set_locked(True)
+    with open(path, "r") as handle:
+        text = handle.read()
+    check("[display]" in text and "swap_lr" in text, "写入锁定状态时保留其它配置项")
+
+    # 文件损坏时回退默认，不抛异常
+    with open(path, "w") as handle:
+        handle.write("[rotation\nlocked = true\n")
+    eq(store.read(), (None, None), "配置损坏时回退 None")
+
+    eq(lockstate.normalize_angle("90"), 90, "字符串角度可解析")
+    eq(lockstate.normalize_angle(" 180 "), 180, "带空格可解析")
+    eq(lockstate.normalize_angle(200), None, "非法角度返回 None")
+    eq(lockstate.VALID_ANGLES, (0, 90, 180, 270), "合法角度集合")
+
+
+def test_rotation_policy():
+    print("[lock] 锁定策略：恢复 / 切换 / 纠正 / 持久化")
+    from cutiepi_hud import lockstate
+
+    path = _rotation_state_path("rotation-policy.ini")
+    store = lockstate.RotationState(user_path=path)
+    policy = lockstate.RotationPolicy(store, default_locked=False)
+
+    eq(policy.restore(), (False, None), "默认允许旋转，且没有保存角度")
+    eq(policy.target_for("normal", 180), 180, "允许旋转时按姿态下发")
+    check(policy.commit(180), "首次 commit 会写盘")
+    eq(store.read()[1], 180, "角度已持久化")
+    check(not policy.commit(180), "角度没变就不重复写盘")
+
+    store.set_locked(True)
+    time.sleep(0.02)
+    eq(policy.poll(), "lock", "检测到锁定")
+    eq(policy.target_for("left-up", 270), None, "锁定后姿态变化不下发")
+    eq(policy.current_angle, 180, "锁定后当前角度保持不变")
+    eq(policy.status_text(), "已锁定（保持当前方向）", "状态文案")
+
+    store.set_locked(False)
+    time.sleep(0.02)
+    eq(policy.poll(), "unlock", "检测到解锁")
+    eq(policy.unlock_target("left-up", 270), 270, "解锁后立即纠正到当前姿态")
+
+    # 模拟重启：新的 policy 从文件恢复
+    policy2 = lockstate.RotationPolicy(store, default_locked=False)
+    eq(policy2.restore(), (False, 180), "重启后恢复锁定状态与上次角度")
+
+    # 禁止旋转 + 上次角度 = 下次开机保持原方向
+    store.set_locked(True)
+    store.set_angle(270)
+    policy3 = lockstate.RotationPolicy(store, default_locked=False)
+    eq(policy3.restore(), (True, 270), "锁定 + 角度一起恢复")
+    eq(policy3.target_for("normal", 180), None, "恢复为锁定后仍忽略重力")
+
+
+def test_lock_icon():
+    print("[tray] 旋转锁定图标")
+    from cutiepi_hud import tray
+
+    # 真机是浅色面板，主题前景色探测出来是黑色，这里显式指定成黑色
+    black = (0.0, 0.0, 0.0)
+    locked = tray.render_rotation_icon(True, 32, foreground=black)
+    unlocked = tray.render_rotation_icon(False, 32, foreground=black)
+    eq(len(locked), 32 * 32, "图标尺寸")
+    check(locked != unlocked, "禁止与允许的图标不同")
+    check(sum(1 for px in locked if px[3] > 0) > 0, "禁止图标有内容")
+    check(sum(1 for px in unlocked if px[3] > 0) > 0, "允许图标有内容")
+
+    def colors(pixels, minimum_alpha=200):
+        return {px[:3] for px in pixels if px[3] >= minimum_alpha}
+
+    unlocked_colors = colors(unlocked)
+    locked_colors = colors(locked)
+    check(
+        all(sum(color) < 200 for color in unlocked_colors),
+        "允许旋转：箭头是前景色（浅色面板上是黑色）",
+    )
+    check(
+        any(sum(color) > 330 for color in locked_colors),
+        "禁止旋转：箭头是灰色",
+    )
+    check(
+        any(sum(color) < 200 for color in locked_colors),
+        "禁止旋转：叠加了黑色斜线",
+    )
+
+    # 斜线确实是对角的：左上角和右下角都应该有黑色像素
+    size = 32
+    top_left = any(
+        sum(locked[y * size + x][:3]) < 200 and locked[y * size + x][3] > 200
+        for y in range(4, 12)
+        for x in range(4, 12)
+    )
+    bottom_right = any(
+        sum(locked[y * size + x][:3]) < 200 and locked[y * size + x][3] > 200
+        for y in range(20, 28)
+        for x in range(20, 28)
+    )
+    check(top_left and bottom_right, "斜线从左上方延伸到右下方")
+    check(
+        not any(
+            sum(unlocked[y * size + x][:3]) > 330 and unlocked[y * size + x][3] > 200
+            for y in range(size)
+            for x in range(size)
+        ),
+        "允许旋转时没有灰色像素（纯前景色）",
+    )
+
+    eq(tray.build_lock_tooltip(True), ("", ""), "禁止旋转：不显示 tooltip")
+    eq(tray.build_lock_tooltip(False), ("", ""), "允许旋转：也不显示 tooltip")
+
+    from cutiepi_hud import rotation_tray
+
+    eq(rotation_tray.toast_text(True), "旋转已禁止", "切到禁止时提示文字")
+    eq(rotation_tray.toast_text(False), "旋转已允许", "切到允许时提示文字")
+
+    provider = tray.TrayProvider(kind="rotation", foreground=(0.0, 0.0, 0.0), icon_size=32)
+    check(provider.update_lock(True), "状态变化会刷新")
+    check(not provider.update_lock(True), "状态没变不刷新")
+    eq(provider.lock_snapshot()["locked"], True, "状态已保存")
+    eq(len(provider._pixels()), 32 * 32, "能渲染出图标像素")
+
+
+def test_worker_lock_behaviour():
+    print("[daemon] 锁定期间：不跟随重力、防跑偏、下发即持久化")
+    from cutiepi_hud import daemon as daemon_module
+    from cutiepi_hud import lockstate
+
+    class FakeRotator(object):
+        backend = "wayland"
+        last_error = None
+
+        def __init__(self):
+            self.applied = []
+            self.current = None
+
+        def apply(self, degrees):
+            self.applied.append(degrees)
+            self.current = degrees
+            return True
+
+        def transform_wayland(self, degrees):
+            return {0: "normal", 90: "90", 180: "180", 270: "270"}[degrees]
+
+        def rotate_name_x11(self, degrees):
+            return {0: "normal", 90: "right", 180: "inverted", 270: "left"}[degrees]
+
+        def current_transform(self):
+            if self.current is None:
+                return None
+            return self.transform_wayland(self.current)
+
+    path = _rotation_state_path("rotation-worker.ini")
+    store = lockstate.RotationState(user_path=path)
+    policy = lockstate.RotationPolicy(store, default_locked=False)
+    policy.restore()
+
+    cfg = config_module.Config({("mcu", "screen_toggle"): True})
+    rotator = FakeRotator()
+    worker = daemon_module.OrientationWorker(
+        cfg,
+        daemon_module.RuntimeState(),
+        threading.Event(),
+        logger=lambda _m: None,
+        rotator=rotator,
+        policy=policy,
+    )
+
+    check(worker._apply("left-up", 270), "下发旋转成功")
+    eq(rotator.applied, [270], "下发的角度")
+    eq(store.read()[1], 270, "下发后自动写盘（关机不丢方向）")
+    eq(worker.runtime.snapshot().get("rotation"), 270, "状态文件里的角度也更新")
+
+    policy.locked = True
+    eq(policy.target_for("normal", 180), None, "锁定后忽略重力")
+    eq(policy.unlock_target("normal", 180), None, "锁定时不会因为解锁逻辑而纠正")
+
+    # 有人/别的程序把方向改成了 180：锁定期间应纠回 270
+    rotator.current = 180
+    worker._ensure_locked_transform()
+    eq(rotator.applied[-1], 270, "锁定期间发现跑偏会纠回锁定角度")
+
+    # 方向本来就是对的，就不该重复下发
+    before = len(rotator.applied)
+    worker._ensure_locked_transform()
+    eq(len(rotator.applied), before, "方向正确时不重复下发")
+
+
 def cleanup():
     """跑完清掉临时目录（某些沙箱环境删不掉，忽略即可）。"""
     if os.path.isdir(TEMP_ROOT):
@@ -835,6 +1055,10 @@ def main():
     test_double_press_dialog()
     test_repeated_shutdown_requests()
     test_brightness()
+    test_rotation_state()
+    test_rotation_policy()
+    test_lock_icon()
+    test_worker_lock_behaviour()
     test_tray_icon()
     test_tray_number_icon()
     test_tray_tooltip()

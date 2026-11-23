@@ -74,6 +74,14 @@ DEFAULTS = {
     ("hud", "icon_style"): ("number", str),
     # 状态栏上是否显示亮度图标（点一下弹 1..15 的滑块）
     ("hud", "brightness_icon"): (True, bool),
+    # 状态栏上是否显示"旋转锁定"图标（点一下在允许/禁止旋转之间切换）
+    ("hud", "rotation_icon"): (True, bool),
+    # ---- 旋转锁定状态（运行时由状态栏图标/命令写入用户配置）----
+    # locked = 禁止自动旋转；false = 跟随重力（默认）
+    ("rotation", "locked"): (False, bool),
+    # 上一次生效的屏幕角度（0/90/180/270）；-1 表示还没记录过
+    # 只从用户配置读取，写在系统默认配置里没有意义
+    ("rotation", "last_angle"): (-1, int),
     ("hud", "overlay"): ("/opt/cutiepi-hud/hud-overlay", str),
     ("hud", "margin_top"): (40, int),
     ("hud", "margin_right"): (8, int),
@@ -204,28 +212,58 @@ def load_config(system_path=SYSTEM_CONF, user_path=None, verbose=False):
 
 
 def write_user_overrides(overrides, user_path=None):
-    """把 {section: {key: value}} 写进用户配置文件（保留其它已有项）。"""
+    """把 {section: {key: value}} 写进用户配置文件（保留其它已有项）。
+
+    两个细节是给"守护进程频繁写 last_angle"准备的：
+    * 用文件锁串行化读-改-写，避免和 calibrate 之类的同时写导致丢键；
+    * 先写临时文件再 os.replace，避免掉电时留下半个文件。
+    """
     user_path = user_path if user_path is not None else user_conf_path()
-    parser = configparser.ConfigParser(interpolation=None)
-    parser.optionxform = str
-    if os.path.exists(user_path):
-        try:
-            with open(user_path, "r") as handle:
-                parser.read_file(handle)
-        except (configparser.Error, IOError, OSError):
-            pass
-
-    for section, items in overrides.items():
-        if not parser.has_section(section):
-            parser.add_section(section)
-        for key, value in items.items():
-            if isinstance(value, bool):
-                value = "true" if value else "false"
-            parser.set(section, key, str(value))
-
     directory = os.path.dirname(user_path)
     if directory and not os.path.isdir(directory):
         os.makedirs(directory)
-    with open(user_path, "w") as handle:
-        parser.write(handle)
-    return user_path
+
+    lock_handle = None
+    try:
+        try:
+            lock_handle = open(user_path + ".lock", "a+")
+            import fcntl
+
+            fcntl.flock(lock_handle.fileno(), fcntl.LOCK_EX)
+        except (ImportError, OSError):
+            lock_handle = None  # Windows / 无 fcntl：退化为不加锁
+
+        parser = configparser.ConfigParser(interpolation=None)
+        parser.optionxform = str
+        if os.path.exists(user_path):
+            try:
+                with open(user_path, "r") as handle:
+                    parser.read_file(handle)
+            except (configparser.Error, IOError, OSError):
+                pass
+
+        for section, items in overrides.items():
+            if not parser.has_section(section):
+                parser.add_section(section)
+            for key, value in items.items():
+                if isinstance(value, bool):
+                    value = "true" if value else "false"
+                parser.set(section, key, str(value))
+
+        temp_path = user_path + ".tmp"
+        with open(temp_path, "w") as handle:
+            parser.write(handle)
+        os.replace(temp_path, user_path)
+        return user_path
+    finally:
+        if lock_handle is not None:
+            try:
+                import fcntl
+
+                fcntl.flock(lock_handle.fileno(), fcntl.LOCK_UN)
+            except (ImportError, OSError):
+                pass
+            try:
+                lock_handle.close()
+            except OSError:
+                pass

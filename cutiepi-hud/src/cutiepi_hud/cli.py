@@ -18,7 +18,7 @@ import subprocess
 import sys
 import time
 
-from . import __version__, config as config_module, iio, mcu, orient, session, util
+from . import __version__, config as config_module, iio, lockstate, mcu, orient, session, util
 from . import state as state_module
 from . import serialport
 
@@ -319,6 +319,77 @@ def cmd_power_dialog(args):
 
 
 # ---------------------------------------------------------------------------
+# rotate-lock：允许 / 禁止自动旋转（状态栏图标也是改这个状态）
+# ---------------------------------------------------------------------------
+def cmd_rotate_lock(args):
+    cfg = _load(args)
+    store = lockstate.RotationState()
+    default_locked = cfg.as_bool("rotation", "locked")
+    locked, angle = store.read()
+    if locked is None:
+        locked = default_locked
+
+    action = (args.action or "status").lower()
+    if action == "status":
+        print(
+            "旋转：%s（上次方向：%s）"
+            % (
+                "禁止（保持当前方向）" if locked else "允许（跟随重力）",
+                ("%d°" % angle) if angle is not None else "未记录",
+            )
+        )
+        return 0
+
+    if action == "on":
+        target = True
+    elif action == "off":
+        target = False
+    elif action == "toggle":
+        target = not locked
+    else:
+        print("用法：cutiepi-hud rotate-lock [on|off|toggle|status]", file=sys.stderr)
+        return 2
+
+    store.set_locked(target)
+    print("旋转已%s" % ("禁止（保持当前方向）" if target else "允许（跟随重力）"))
+    print("守护进程会在 1 秒内生效；如果它没在运行，下次启动时按这个状态继续。")
+    return 0
+
+
+# ---------------------------------------------------------------------------
+# rotate-apply-saved：开机极早地把上次的屏幕方向恢复回来
+# ---------------------------------------------------------------------------
+def cmd_rotate_apply_saved(args):
+    cfg = _load(args)
+    store = lockstate.RotationState()
+    _locked, angle = store.read()
+    if angle is None:
+        print("还没有保存过屏幕方向，跳过")
+        return 0
+
+    from .rotate import Rotator
+
+    rotator = Rotator(
+        output=cfg.get("display", "output"),
+        backend=cfg.get("display", "backend"),
+        swap_lr=cfg.as_bool("display", "swap_lr"),
+        touch_matrix=cfg.as_bool("display", "touch_matrix"),
+    )
+    backend, output = rotator.detect()
+    if not backend:
+        print(
+            "没有可用的旋转后端：%s" % (rotator.last_error or "未检测到显示服务器"),
+            file=sys.stderr,
+        )
+        return 2
+    if rotator.apply(angle):
+        print("已恢复上次的屏幕方向：%d°（输出 %s）" % (angle, output))
+        return 0
+    print("恢复失败：%s" % (rotator.last_error or "未知错误"), file=sys.stderr)
+    return 2
+
+
+# ---------------------------------------------------------------------------
 # rotate-calibrate：交互标定「每个姿态应该用哪个旋转角度」
 # ---------------------------------------------------------------------------
 def _stop_daemon(log=None):
@@ -587,6 +658,7 @@ def cmd_test_rotate(args):
         return 2
 
     angles = args.angles or [0, 90, 180, 270]
+    last_ok = None
     for angle in angles:
         ok = rotator.apply(angle)
         print(
@@ -594,8 +666,19 @@ def cmd_test_rotate(args):
             % (angle, "OK" if ok else "失败: %s" % rotator.last_error, rotator.current_transform())
         )
         sys.stdout.flush()
+        if ok:
+            last_ok = angle
         if len(angles) > 1:
             time.sleep(args.delay)
+
+    # 锁定状态下"手动定方向"也算数：把最后成功的角度记成上次方向，
+    # 这样关掉再开机仍停在这个方向（跟随重力时不记，免得覆盖真实姿态）。
+    if last_ok is not None and len(angles) == 1:
+        store = lockstate.RotationState()
+        locked, _angle = store.read()
+        if locked:
+            store.set_angle(last_ok)
+            print("已把 %d° 记为上次方向（当前为禁止旋转）" % last_ok)
     return 0
 
 
@@ -898,6 +981,11 @@ def cmd_diagnose(args):
     add("  当前 transform：%s" % (rotator.current_transform() or "未知"))
     add("  wlr-randr：%s" % ("已安装" if _which("wlr-randr") else "未安装"))
     add("  xrandr   ：%s" % ("已安装" if _which("xrandr") else "未安装"))
+    locked, saved_angle = lockstate.RotationState().read()
+    if locked is None:
+        locked = cfg.as_bool("rotation", "locked")
+    add("  旋转锁定：%s" % ("禁止旋转（保持当前方向）" if locked else "允许旋转（跟随重力）"))
+    add("  上次方向：%s" % (("%d°" % saved_angle) if saved_angle is not None else "未记录"))
     add("")
 
     add("[加速度计]")
@@ -1210,6 +1298,21 @@ def build_parser():
     demo_parser.add_argument("--mode", choices=("tray", "overlay", "both"), default=None)
     demo_parser.add_argument("--state-file", default=None)
 
+    rotate_lock_parser = sub.add_parser(
+        "rotate-lock",
+        help="允许/禁止自动旋转（状态栏图标也是改这个）",
+        parents=[common],
+    )
+    rotate_lock_parser.add_argument(
+        "action", nargs="?", default="status", choices=("on", "off", "toggle", "status")
+    )
+
+    sub.add_parser(
+        "rotate-apply-saved",
+        help="按上次保存的屏幕方向应用一次（开机极早执行）",
+        parents=[common],
+    )
+
     tray_parser = sub.add_parser(
         "tray-test", help="只测试状态栏图标（不需要 MCU）", parents=[common]
     )
@@ -1227,6 +1330,8 @@ HANDLERS = {
     "calibrate": cmd_calibrate,
     "rotate-calibrate": cmd_rotate_calibrate,
     "rotate-flip": cmd_rotate_flip,
+    "rotate-lock": cmd_rotate_lock,
+    "rotate-apply-saved": cmd_rotate_apply_saved,
     "screen": cmd_screen,
     "brightness": cmd_brightness,
     "power-dialog": cmd_power_dialog,

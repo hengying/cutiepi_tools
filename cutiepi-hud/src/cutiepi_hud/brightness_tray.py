@@ -19,7 +19,6 @@ if __package__ in (None, ""):
     sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
     __package__ = "cutiepi_hud"
 
-RESTART_DELAYS = (2, 5, 10, 30, 60)
 POPUP_SCRIPT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "brightness_popup.py")
 
 
@@ -33,59 +32,22 @@ class BrightnessTrayProcess(object):
     """把亮度图标当成子进程跑，崩了按退避重启（守护进程用它）。"""
 
     def __init__(self, logger=None):
-        self.log = logger or (lambda message: None)
-        self.proc = None
-        self._starts = 0
-        self._next_start = 0.0
-        self._started_at = 0.0
+        from .trayprocess import TrayProcess
+
+        self._inner = TrayProcess(os.path.abspath(__file__), logger)
 
     @property
     def running(self):
-        return self.proc is not None and self.proc.poll() is None
+        return self._inner.running
 
     def start(self):
-        try:
-            self.proc = subprocess.Popen(
-                [sys.executable, os.path.abspath(__file__)],
-                env=dict(os.environ),
-            )
-        except OSError as exc:
-            self.log("亮度图标启动失败：%s" % exc)
-            return False
-        self._starts += 1
-        self._started_at = time.time()
-        self.log("亮度图标已启动（pid=%d）" % self.proc.pid)
-        return True
+        return self._inner.start()
 
     def ensure(self):
-        if self.running:
-            if self._starts and time.time() - self._started_at > 120:
-                self._starts = 0
-            return True
-        if self.proc is not None:
-            code = self.proc.poll()
-            if code is not None:
-                self.log("亮度图标退出（code=%s），稍后重启" % code)
-                self.proc = None
-        now = time.time()
-        if now < self._next_start:
-            return False
-        delay = RESTART_DELAYS[min(self._starts, len(RESTART_DELAYS) - 1)]
-        self._next_start = now + delay
-        return self.start()
+        return self._inner.ensure()
 
     def stop(self):
-        if self.proc is None:
-            return
-        try:
-            self.proc.terminate()
-            self.proc.wait(timeout=5)
-        except (OSError, subprocess.TimeoutExpired):
-            try:
-                self.proc.kill()
-            except OSError:
-                pass
-        self.proc = None
+        self._inner.stop()
 
 
 def main():

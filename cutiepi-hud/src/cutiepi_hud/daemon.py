@@ -8,10 +8,11 @@ import sys
 import threading
 import time
 
-from . import backlight, iio, mcu, orient, rotate, serialport, util
+from . import backlight, iio, lockstate, mcu, orient, rotate, serialport, util
 from . import session as session_module
 from .overlay import OverlayProcess
 from .brightness_tray import BrightnessTrayProcess
+from .rotation_tray import RotationTrayProcess
 from .state import StateFile, default_path
 from .tray import TrayProvider
 
@@ -357,26 +358,34 @@ class McuWorker(threading.Thread):
 # 姿态 / 旋转线程
 # ---------------------------------------------------------------------------
 class OrientationWorker(threading.Thread):
-    def __init__(self, config, runtime, stop_event, logger=None, dry_run=False):
+    def __init__(self, config, runtime, stop_event, logger=None, dry_run=False,
+                 policy=None, rotator=None, tracker=None):
         super(OrientationWorker, self).__init__(name="orientation", daemon=True)
         self.cfg = config
         self.runtime = runtime
         self.stop = stop_event
         self.log = logger or logging.info
         self.dry_run = dry_run
-        self.rotator = rotate.Rotator(
+        self.rotator = rotator or rotate.Rotator(
             output=config.get("display", "output"),
             backend=config.get("display", "backend"),
             swap_lr=config.as_bool("display", "swap_lr"),
             touch_matrix=config.as_bool("display", "touch_matrix"),
             dry_run=dry_run,
         )
-        self.tracker = orient.OrientationTracker(
+        self.tracker = tracker or orient.OrientationTracker(
             mapping=config.orientation_mapping,
             threshold=config.as_float("orientation", "threshold"),
             flat_threshold=config.as_float("orientation", "flat_threshold"),
             confirm=config.as_int("orientation", "confirm"),
         )
+        # 锁定状态 + 上次角度：存在用户配置里，独立成可单测的策略对象
+        self.policy = policy or lockstate.RotationPolicy(
+            lockstate.RotationState(),
+            default_locked=config.as_bool("rotation", "locked"),
+            logger=self.log,
+        )
+        self._last_drift_check = 0.0
         self._last_error = None
 
     def run(self):
@@ -401,7 +410,29 @@ class OrientationWorker(threading.Thread):
         started_at = time.time()
         baseline_applied = False
 
+        # 开机第一步：先按上次关机时的方向应用，再按锁定状态继续
+        locked, saved_angle = self.policy.restore()
+        if saved_angle is not None and backend is not None:
+            self.log("应用上次的屏幕方向：%d°" % saved_angle)
+            if self._apply(None, saved_angle):
+                baseline_applied = True
+        if locked:
+            self.log("旋转已锁定：保持当前方向（点状态栏的锁图标可允许旋转）")
+
         while not self.stop.is_set():
+            # 状态栏图标/命令行改了锁定状态？
+            change = self.policy.poll()
+            if change == "lock":
+                self.log("旋转已禁止：保持当前方向")
+            elif change == "unlock":
+                self.log("旋转已允许：跟随重力")
+                posture_now = getattr(self.tracker, "posture", None)
+                if posture_now:
+                    target = self.policy.unlock_target(posture_now, self.cfg.degree_for(posture_now))
+                    if target is not None and backend is not None:
+                        self._apply(posture_now, target)
+                        baseline_applied = True
+
             if not accel.available:
                 if not warned:
                     self.log("没找到加速度计（IIO 设备）。检查 config.txt 里的 mpu6050-i2c5 叠加层")
@@ -430,20 +461,27 @@ class OrientationWorker(threading.Thread):
             posture = self.tracker.update(x, y, z)
             if posture:
                 degrees = self.cfg.degree_for(posture)
-                self.runtime.update(posture=posture, rotation=degrees)
-                if degrees is None:
-                    self.log("姿态 %s 没有配置角度，已跳过" % posture)
+                self.runtime.update(posture=posture)
+                target = self.policy.target_for(posture, degrees)
+                if target is None:
+                    # 锁定中：姿态照记，但屏幕方向不动
+                    pass
                 elif backend is None:
                     backend, output = self.rotator.detect(force=True)
                     if backend is None:
                         self.log("姿态 %s 需要旋转，但没有可用的旋转后端" % posture)
                     else:
-                        self._apply(posture, degrees)
+                        self._apply(posture, target)
                         baseline_applied = True
                 else:
-                    self._apply(posture, degrees)
+                    self._apply(posture, target)
                     baseline_applied = True
-            elif not baseline_applied and time.time() - started_at > 3.0 and backend:
+            elif (
+                not baseline_applied
+                and not self.policy.locked
+                and time.time() - started_at > 3.0
+                and backend
+            ):
                 # 开机时平板如果是平放的（重力在 Z 轴），判断不出横竖，
                 # 这里按"竖屏"兜底，避免屏幕停在合成器默认方向（这台机器上是上下颠倒的）。
                 degrees = self.cfg.degree_for("normal")
@@ -451,6 +489,13 @@ class OrientationWorker(threading.Thread):
                     self.log("平板平放，先按竖屏方向兜底：%d°" % degrees)
                     self._apply("normal", degrees)
                 baseline_applied = True
+
+            # 锁定期间定期校验：万一被别的程序（或合成器重启）改了方向，纠回来
+            if self.policy.locked and backend is not None:
+                now = time.time()
+                if now - self._last_drift_check >= 5.0:
+                    self._last_drift_check = now
+                    self._ensure_locked_transform()
 
             self.stop.wait(poll)
 
@@ -461,13 +506,39 @@ class OrientationWorker(threading.Thread):
                 actual = self.rotator.transform_wayland(degrees)
             else:
                 actual = self.rotator.rotate_name_x11(degrees)
-            self.log("姿态 %s -> 旋转 %d°（实际下发 %s）" % (posture, degrees, actual))
+            if posture:
+                self.log("姿态 %s -> 旋转 %d°（实际下发 %s）" % (posture, degrees, actual))
+            else:
+                self.log("应用旋转 %d°（实际下发 %s）" % (degrees, actual))
+            self.runtime.update(rotation=degrees)
+            # 每次生效都落盘：关机/断电后下次开机就能恢复到这个方向
+            self.policy.commit(degrees)
             self._last_error = None
+            return True
+        message = self.rotator.last_error or "未知错误"
+        if message != self._last_error:
+            self.log("旋转失败：%s" % message)
+            self._last_error = message
+        return False
+
+    def _ensure_locked_transform(self):
+        """锁定期间校验实际 transform，发现被改动就重新下发。"""
+        angle = self.policy.current_angle
+        if angle is None:
+            return
+        actual = self.rotator.current_transform()
+        if actual is None:
+            return
+        if self.rotator.backend == "wayland":
+            expected = self.rotator.transform_wayland(angle)
         else:
-            message = self.rotator.last_error or "未知错误"
-            if message != self._last_error:
-                self.log("旋转失败：%s" % message)
-                self._last_error = message
+            expected = self.rotator.rotate_name_x11(angle)
+        if actual != expected:
+            self.log(
+                "屏幕方向被改动了（%s ≠ %s），按锁定方向重新应用 %d°"
+                % (actual, expected, angle)
+            )
+            self._apply(None, angle)
 
     def _transform(self, x, y, z):
         cfg = self.cfg
@@ -566,6 +637,13 @@ def run(config, args, logger=None):
         brightness_tray.ensure()
         log("亮度图标：%s" % ("已启动" if brightness_tray.running else "稍后重试"))
 
+    # 状态栏旋转锁定图标（同样独立进程）
+    rotation_tray = None
+    if config.as_bool("hud", "rotation_icon") and not getattr(args, "no_hud", False):
+        rotation_tray = RotationTrayProcess(logger=log)
+        rotation_tray.ensure()
+        log("旋转锁定图标：%s" % ("已启动" if rotation_tray.running else "稍后重试"))
+
     if not getattr(args, "no_rotate", False):
         worker = OrientationWorker(
             config, runtime, stop_event, log, dry_run=getattr(args, "dry_run", False)
@@ -590,15 +668,27 @@ def run(config, args, logger=None):
                 overlay.ensure()
             if brightness_tray is not None:
                 brightness_tray.ensure()
+            if rotation_tray is not None:
+                rotation_tray.ensure()
             stop_event.wait(1.0)
     finally:
         stop_event.set()
+        # 退出时再补写一次当前角度（"关机时保存屏幕朝向"）
+        try:
+            angle = runtime.snapshot().get("rotation")
+            if angle in lockstate.VALID_ANGLES:
+                lockstate.RotationState().set_angle(angle)
+                log("已保存当前屏幕方向：%d°" % angle)
+        except (IOError, OSError) as exc:
+            log("保存屏幕方向失败：%s" % exc)
         if tray is not None:
             tray.stop()
         if overlay is not None:
             overlay.stop()
         if brightness_tray is not None:
             brightness_tray.stop()
+        if rotation_tray is not None:
+            rotation_tray.stop()
         for worker in workers:
             worker.join(timeout=3)
         lock.release()

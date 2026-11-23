@@ -324,6 +324,124 @@ def render_sun_icon(level, max_level=15, size=32, foreground=None):
     return result
 
 
+def build_lock_tooltip(locked):
+    """旋转锁定图标的 (标题, 说明)。
+
+    永远返回空文本——面板弹出的 tooltip 在触摸屏上不会自己消失
+    （没有"指针离开"事件），而且会一直显示旧内容。
+    切换状态的提示改由 toast.py 弹一个会自动消失的小气泡。
+    """
+    return ("", "")
+
+
+def _clear_shape(pixels, width, height, predicate):
+    """把命中的像素清成完全透明（用来挖斜线的空隙）。"""
+    for py in range(height):
+        for px in range(width):
+            if predicate(px + 0.5, py + 0.5):
+                index = (py * width + px) * 4
+                pixels[index : index + 4] = [0.0, 0.0, 0.0, 0.0]
+
+
+# 禁止旋转时箭头的灰色（面板多为浅色底，这个灰度足够看清又不抢眼）
+LOCKED_ARROW_COLOR = (0.55, 0.55, 0.55)
+
+
+def render_rotation_icon(locked, size=32, foreground=None):
+    """旋转图标：一个循环箭头。
+
+    * 允许旋转：箭头用前景色（浅底面板上是黑色）；
+    * 禁止旋转：箭头变灰，再叠一条前景色的斜线（斜线两侧挖空，像"禁止"符号）。
+    """
+    import math
+
+    fg = foreground or DEFAULT_FOREGROUND
+    arrow_color = LOCKED_ARROW_COLOR if locked else fg
+    size = int(size)
+    scale = SUPERSAMPLE
+    big = size * scale
+    pixels = [0.0] * (big * big * 4)
+    center = (big - 1) / 2.0
+
+    # 循环箭头：圆环留缺口 + 端点箭头
+    r_out, r_in = 0.42 * big, 0.30 * big
+    gap_start = 292.0
+    radius_mid = (r_in + r_out) / 2.0
+
+    def _polar(radius, degrees):
+        angle = math.radians(degrees)
+        return (center + radius * math.cos(angle), center + radius * math.sin(angle))
+
+    def _ring(px, py):
+        dx, dy = px - center, py - center
+        distance = math.hypot(dx, dy)
+        if not (r_in <= distance <= r_out):
+            return False
+        angle = math.degrees(math.atan2(dy, dx)) % 360.0
+        return angle <= gap_start
+
+    _fill_shape(pixels, big, big, _ring, arrow_color, 1.0)
+
+    # 箭头：比圆环略宽，尖端顺着圆弧方向（顺时针），小尺寸下也看得清
+    tip = _polar(radius_mid, 348.0)
+    base_out = _polar(r_out + 0.08 * big, 280.0)
+    base_in = _polar(r_in - 0.08 * big, 280.0)
+    _fill_shape(
+        pixels, big, big,
+        lambda px, py: _inside_polygon(px, py, [tip, base_out, base_in]),
+        arrow_color, 1.0,
+    )
+
+    if locked:
+        # 斜线：从左上到右下（y = x），先挖空两侧再画线，形成 ⊘ 的样子
+        margin = 0.06 * big
+
+        def _slash_distance(px, py):
+            return abs(py - px) / math.sqrt(2.0)
+
+        def _slash_area(px, py):
+            return margin <= px <= big - margin and margin <= py <= big - margin
+
+        _clear_shape(
+            pixels, big, big,
+            lambda px, py: _slash_area(px, py) and _slash_distance(px, py) <= 0.135 * big,
+        )
+        _fill_shape(
+            pixels, big, big,
+            lambda px, py: _slash_area(px, py) and _slash_distance(px, py) <= 0.058 * big,
+            fg, 1.0,
+        )
+
+    result = []
+    inv = 1.0 / (scale * scale)
+    for y in range(size):
+        for x in range(size):
+            sum_a = 0.0
+            sum_r = 0.0
+            sum_g = 0.0
+            sum_b = 0.0
+            for sy in range(scale):
+                for sx in range(scale):
+                    index = ((y * scale + sy) * big + (x * scale + sx)) * 4
+                    alpha = pixels[index + 3]
+                    sum_a += alpha
+                    sum_r += pixels[index] * alpha
+                    sum_g += pixels[index + 1] * alpha
+                    sum_b += pixels[index + 2] * alpha
+            if sum_a <= 0.0:
+                result.append((0, 0, 0, 0))
+                continue
+            result.append(
+                (
+                    int(round(max(0.0, min(1.0, sum_r / sum_a)) * 255)),
+                    int(round(max(0.0, min(1.0, sum_g / sum_a)) * 255)),
+                    int(round(max(0.0, min(1.0, sum_b / sum_a)) * 255)),
+                    int(round(max(0.0, min(1.0, sum_a * inv)) * 255)),
+                )
+            )
+    return result
+
+
 def build_tooltip(percent, charging, present=True):
     """返回 (标题, 说明) 两段文本。"""
     if not present or percent is None or percent < 0:
@@ -727,6 +845,7 @@ class TrayProvider(object):
         self._bus_name = None
         self._state = {"percent": -1, "charging": False, "present": False}
         self._brightness = {"level": None, "max": 15}
+        self._rotation = {"locked": False}
         self._lock = threading.Lock()
         self._last_icon = None
         self._gtk_icon = None
@@ -795,6 +914,24 @@ class TrayProvider(object):
     def brightness_snapshot(self):
         with self._lock:
             return dict(self._brightness)
+
+    # -- 旋转锁定图标（kind="rotation"）------------------------------------
+    def update_lock(self, locked):
+        """线程安全：更新锁定状态并让状态栏重画。"""
+        locked = bool(locked)
+        with self._lock:
+            if locked == self._rotation["locked"]:
+                return False
+            self._rotation = {"locked": locked}
+        try:
+            self._refresh()
+        except Exception as exc:
+            self.log("旋转图标更新失败：%s" % exc)
+        return True
+
+    def lock_snapshot(self):
+        with self._lock:
+            return dict(self._rotation)
 
     # -- 后端选择 ---------------------------------------------------------
     def _run(self):
@@ -1058,7 +1195,10 @@ class TrayProvider(object):
     def _on_get_property(self, connection, sender, object_path, interface_name, property_name):
         from gi.repository import GLib
 
-        if self.kind == "brightness":
+        if self.kind == "rotation":
+            state = self.lock_snapshot()
+            title, tooltip = build_lock_tooltip(state["locked"])
+        elif self.kind == "brightness":
             state = self.brightness_snapshot()
             title, tooltip = build_sun_tooltip(state["level"], state["max"])
         else:
@@ -1088,8 +1228,8 @@ class TrayProvider(object):
 
     def _on_method_call(self, connection, sender, object_path, interface_name,
                         method_name, parameters, invocation):
-        # 亮度图标：左键/中键点击 -> 弹亮度滑块
-        if self.kind == "brightness" and self.on_activate is not None:
+        # 亮度 / 旋转图标：左键（中键、右键也算）点击 -> 交给回调
+        if self.kind in ("brightness", "rotation") and self.on_activate is not None:
             if method_name in ("Activate", "SecondaryActivate", "ContextMenu"):
                 try:
                     self.on_activate(method_name)
@@ -1102,6 +1242,22 @@ class TrayProvider(object):
 
     def _pixels(self):
         """按当前状态渲染图标像素（带缓存，避免每次 GetAll 都重画）。"""
+        if self.kind == "rotation":
+            state = self.lock_snapshot()
+            key = ("rotation", state["locked"], self.icon_size, self.foreground)
+            with self._lock:
+                cached = self._last_icon
+                if cached is not None and cached[0] == key:
+                    return cached[1]
+            pixels = render_rotation_icon(
+                state["locked"],
+                self.icon_size,
+                foreground=self.foreground,
+            )
+            with self._lock:
+                self._last_icon = (key, pixels)
+            return pixels
+
         if self.kind == "brightness":
             state = self.brightness_snapshot()
             key = ("brightness", state["level"], state["max"], self.icon_size, self.foreground)
