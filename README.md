@@ -150,7 +150,8 @@ The installer is idempotent and prints every change it makes:
 * installs udev rules so the `video` group may write the backlight and the
   `dialout` group may read the MCU serial port
 * installs a `sudoers.d` rule so the power button may shut down without a password
-* installs the shutdown hook that tells the MCU to cut power
+* installs the shutdown hook that tells the MCU to cut power, and copies it into
+  the initramfs (see below)
 * disables the serial getty on `ttyS0` (it steals the MCU frames)
 * adds `avoid_warnings=2` to `config.txt` so the under-voltage popup stays quiet
 * installs a logrotate rule for the daemon log
@@ -224,6 +225,8 @@ cutiepi-hud brightness popup              # show the slider
 
 # ---- power ----
 cutiepi-hud power-dialog                  # preview the shutdown dialog
+cutiepi-hud cutoff --dry-run              # print the MCU cutoff frame (no hardware touched)
+cutiepi-hud cutoff                        # send it now — this cuts the battery immediately
 ```
 
 All of these are safe to call from your own programs: `screen` and `brightness`
@@ -326,6 +329,49 @@ systemd --user: cutiepi-hud run
   a 2.5-second desktop notification instead (`notify.py`), with a small
   self-drawn bubble (`toast.py`) as a fallback when no notification daemon runs.
 
+### Power-off: `poweroff` cuts, `halt` does not
+
+The shutdown hook sends the MCU cutoff frame, but whether the tablet ends up
+**really powered off** depends on how the shutdown was requested:
+
+| How it is shut down | Runs | Cuts battery power? |
+|---|---|---|
+| Power button → double press → dialog → *Shut down* | `sudo systemctl poweroff` | **yes** |
+| Power button → 6 s hold → dialog → *Shut down* | `sudo systemctl poweroff` | **yes** |
+| Panel menu → *Shutdown* (`pishutdown`) | `/sbin/shutdown -h now` → **halt** | **no** |
+| `sudo halt` | `halt.target` | **no** |
+
+`poweroff` powers the SoC down completely (the PMIC drops the core rails), and the
+MCU follows by disconnecting the battery. `halt` only stops the CPU; the SoC stays
+powered, so the MCU has no reason to cut and the tablet has to be force-cut with a
+10-second press.
+
+If you want the panel menu to cut power as well, replace `/sbin/shutdown` (a symlink
+to `systemctl`) with a three-line wrapper that turns `-h` into `-P`:
+
+```sh
+sudo mv /sbin/shutdown /sbin/shutdown.orig
+sudo tee /sbin/shutdown >/dev/null <<'EOF'
+#!/bin/sh
+args=""
+for a in "$@"; do
+    case "$a" in
+        -h|--halt) args="$args -P" ;;
+        *) args="$args $a" ;;
+    esac
+done
+exec /usr/bin/systemctl $args
+EOF
+sudo chmod 755 /sbin/shutdown
+```
+
+The hook itself is a **self-contained POSIX shell script** — no Python, no `/opt`
+dependency — and the installer also copies it into the **initramfs**
+(`/etc/initramfs-tools/hooks/cutiepi-hud-cutoff`). That is required here: Raspberry Pi
+OS with plymouth switches the root filesystem over to the initramfs at the very end of
+shutdown, where a Python-based hook simply cannot run. It sends
+`5A A5 05 01 00 F7 FC` repeatedly, exactly like the official `cutoff` script.
+
 A few details that took the longest to get right, all documented in
 [`docs/protocol.md`](docs/protocol.md):
 
@@ -333,7 +379,8 @@ A few details that took the longest to get right, all documented in
 * the voltage-to-percentage curve (identical to the official shell),
 * posture → rotation mapping and why it needs calibration on some units,
 * the SNI properties a panel actually honours (`IconPixmap` as network-byte-order ARGB),
-* why each tray icon needs its own process.
+* why each tray icon needs its own process,
+* why the shutdown hook must live in the initramfs.
 
 ---
 
@@ -348,6 +395,7 @@ A few details that took the longest to get right, all documented in
 | Brightness does nothing | `cutiepi-hud brightness 10`; if it fails, the `video` group cannot write `/sys/class/backlight/*/brightness`. |
 | Shutdown dialog never appears | `tail -f ~/cutiepi-hud.log` — the log records the button event value and the dialog exit code. |
 | The tablet still powers off by itself | Holding the power button for 10 seconds makes the MCU cut power in hardware; that is not software-controllable. |
+| **Menu shutdown does not cut the power** | Expected on this hardware — the panel's menu runs `/sbin/shutdown -h now` (**halt**), and `halt` leaves the SoC powered. Use the power button (double press or 6-second hold, both end in `systemctl poweroff`) or `sudo systemctl poweroff`. A wrapper for `/sbin/shutdown` that maps `-h` to `-P` is described in the tool README. |
 
 Logs: `~/cutiepi-hud.log` (state changes only), rotated weekly by
 `/etc/logrotate.d/cutiepi-hud`. `: > ~/cutiepi-hud.log` clears it.

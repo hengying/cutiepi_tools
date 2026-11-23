@@ -14,6 +14,7 @@ UDEV_SERIAL="/etc/udev/rules.d/99-cutiepi-hud-serial.rules"
 AUTOSTART="/etc/xdg/autostart/cutiepi-hud.desktop"
 USER_UNIT="/etc/systemd/user/cutiepi-hud.service"
 SHUTDOWN_HOOK="/usr/lib/systemd/system-shutdown/cutiepi-hud-cutoff"
+INITRAMFS_HOOK="/etc/initramfs-tools/hooks/cutiepi-hud-cutoff"
 SUDOERS_FILE="/etc/sudoers.d/cutiepi-hud"
 LOGROTATE="/etc/logrotate.d/cutiepi-hud"
 SCREEN_OFF="/usr/local/bin/cutiepi-screen-off"
@@ -49,12 +50,17 @@ if [ -n "${TARGET_USER:-}" ] && [ "$TARGET_USER" != "root" ]; then
 fi
 
 for path in "$LAUNCHER" "$SCREEN_OFF" "$SCREEN_ON" "$AUTOSTART" "$USER_UNIT" "$UDEV_RULE" \
-            "$UDEV_SERIAL" "$SHUTDOWN_HOOK" "$SUDOERS_FILE" "$LOGROTATE"; do
+            "$UDEV_SERIAL" "$SHUTDOWN_HOOK" "$SUDOERS_FILE" "$LOGROTATE" \
+            "$INITRAMFS_HOOK"; do
     if [ -e "$path" ]; then
         rm -f "$path"
         log "已删除 $path"
     fi
 done
+
+if command -v update-initramfs >/dev/null 2>&1; then
+    update-initramfs -u -k all >/dev/null 2>&1 && log "已重建 initramfs（移除断电钩子）"
+fi
 
 if [ -d "$PREFIX" ]; then
     rm -rf "$PREFIX"

@@ -1,57 +1,70 @@
-#!/usr/bin/python3
-# -*- coding: utf-8 -*-
-"""systemd 关机钩子：通知 MCU 真正切断电池供电。
+#!/bin/sh
+# CutiePi 断电钩子：通知 MCU 切断电池供电。
+#
+# 放在 /usr/lib/systemd/system-shutdown/，systemd 在系统即将断电时执行，
+# 参数是 poweroff / reboot / halt / kexec。reboot 时不切电。
+#
+# 实现照抄官方镜像（pi-gen stage4.5 的 files/cutoff）：
+#   * 不配置串口（不做 stty/termios），直接往 /dev/ttyS0 写字节；
+#   * **循环连续发送**，一直发到 MCU 把电切掉为止（实测只发 3 次 MCU 不认）。
+#
+# 为什么是纯 POSIX shell：关机最后阶段根文件系统可能只读、/opt 与 python 不可用
+# （本机 plymouth 会把根切到 initramfs），用 python 的早期实现根本跑不起来。
+#
+# 帧格式（见 docs/protocol.md，与官方 cutoff/main.cpp 一致）：
+#   5A A5 05 01 00 F7 FC
+# 注意：帧必须**直接 printf 到设备**，不能先存进 shell 变量——变量存不住 NUL，
+# payload 里的 00 会被吞掉，帧就废了（踩过）。
 
-放在 /usr/lib/systemd/system-shutdown/ 下，由 systemd 在系统即将断电时执行，
-参数是 poweroff / reboot / halt / kexec。reboot 时不切电（否则会直接断电变关机）。
+VERB="${1:-poweroff}"
+LOG=/var/log/cutiepi-hud-cutoff.log
+MAX_SENDS="${CUTIEPI_HUD_CUTOFF_SENDS:-200}"
 
-对应 002_资料/cutiepi-middleware-master/cutoff：发送 type=5, payload=0xF7 的帧。
-"""
+log() {
+    stamp=$(date '+%Y-%m-%d %H:%M:%S' 2>/dev/null || echo '-')
+    printf '%s [cutoff] %s\n' "$stamp" "$*" >> "$LOG" 2>/dev/null || true
+}
 
-import os
-import sys
-import time
+log "start verb=$VERB"
 
-LIB = "/opt/cutiepi-hud/lib"
-if LIB not in sys.path:
-    sys.path.insert(0, LIB)
+if [ "$VERB" = "reboot" ]; then
+    log "skip: reboot does not cut power"
+    exit 0
+fi
 
-try:
-    from cutiepi_hud import mcu, serialport
-except Exception:  # 库没装好也不要阻塞关机
-    sys.exit(0)
+if [ "${CUTIEPI_HUD_CUTOFF_DRYRUN:-0}" = "1" ]; then
+    printf '\132\245\005\001\000\367\374' | od -An -tx1
+    log "dry run, not sending"
+    exit 0
+fi
 
+# 选一个存在的串口
+PORT=""
+for candidate in /dev/ttyS0 /dev/serial0 /dev/ttyAMA1; do
+    if [ -e "$candidate" ]; then
+        PORT="$candidate"
+        break
+    fi
+done
 
-def main():
-    verb = sys.argv[1] if len(sys.argv) > 1 else "poweroff"
-    if verb == "reboot":
-        return 0
+if [ -z "$PORT" ]; then
+    log "no serial port found, power will NOT be cut"
+    exit 0
+fi
 
-    dry_run = os.environ.get("CUTIEPI_HUD_CUTOFF_DRYRUN") == "1"
-    frame = mcu.cutoff_frame()
-    if dry_run:
-        print("cutoff frame=%s ports=%s" % (frame.hex(), ",".join(serialport.candidate_ports()) or "none"))
-        return 0
+log "sending cutoff frames to $PORT"
 
-    for port in serialport.candidate_ports():
-        try:
-            fd = serialport.open_port(port, 115200)
-        except OSError:
-            continue
-        try:
-            for _ in range(3):
-                os.write(fd, frame)
-                time.sleep(0.05)
-        except OSError:
-            pass
-        finally:
-            try:
-                os.close(fd)
-            except OSError:
-                pass
-        return 0
-    return 0
+i=0
+while [ "$i" -lt "$MAX_SENDS" ]; do
+    # 直接写设备，绝不经过变量（NUL 会丢）
+    printf '\132\245\005\001\000\367\374' > "$PORT" 2>/dev/null || {
+        log "write to $PORT failed at attempt $i"
+        break
+    }
+    i=$((i + 1))
+    # 尽量给一点间隔；没有 sleep 命令时就不等
+    sleep 0.05 2>/dev/null || true
+done
 
-
-if __name__ == "__main__":
-    sys.exit(main())
+log "stopped after $i frames（若已切电，这里不会写入磁盘）"
+exit 0

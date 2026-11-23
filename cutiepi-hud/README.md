@@ -55,7 +55,7 @@ cutiepi-hud brightness [1-15|+1|-1|popup]  # backlight level, or the slider
 | `autostart/` | desktop autostart entry: applies the saved rotation, then starts the unit |
 | `udev/` | backlight permissions (video group) and `/dev/ttyS0` (dialout group) |
 | `sudoers/` | passwordless `systemctl poweroff` for the power button |
-| `shutdown-hook/` | sends the MCU cutoff frame at the end of a shutdown |
+| `shutdown-hook/` | sends the MCU cutoff frame at the end of a shutdown, plus the initramfs hook that keeps it runnable after the root switch |
 | `tests/` | `run_tests.py`: 326 pure-logic checks, no tablet required |
 
 ## Notes

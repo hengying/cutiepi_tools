@@ -268,6 +268,44 @@ def cmd_brightness(args):
 
 
 # ---------------------------------------------------------------------------
+# cutoff：给 MCU 发送断电帧（关机脚本用；也方便手工验证）
+# ---------------------------------------------------------------------------
+def cmd_cutoff(args):
+    from . import serialport
+
+    frame = mcu.cutoff_frame()
+    dry_run = getattr(args, "dry_run", False)
+    if dry_run:
+        print("frame=%s ports=%s" % (frame.hex(), ",".join(serialport.candidate_ports())))
+        return 0
+
+    for port in serialport.candidate_ports():
+        try:
+            fd = serialport.open_port(port, 115200)
+        except OSError as exc:
+            print("打开 %s 失败：%s" % (port, exc))
+            continue
+        sent = 0
+        try:
+            for _ in range(3):
+                if serialport.write_frame(fd, frame):
+                    sent += 1
+                time.sleep(0.05)
+        finally:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+        if sent:
+            print("已向 %s 发送 %d 次断电帧" % (port, sent))
+            return 0
+        print("向 %s 写入失败" % port)
+
+    print("没有可用的串口，未发送断电帧", file=sys.stderr)
+    return 2
+
+
+# ---------------------------------------------------------------------------
 # screen：息屏 / 亮屏（也装成 cutiepi-screen-off / cutiepi-screen-on 两个命令）
 # ---------------------------------------------------------------------------
 def cmd_screen(args):
@@ -1313,6 +1351,12 @@ def build_parser():
         parents=[common],
     )
 
+    sub.add_parser(
+        "cutoff",
+        help="向 MCU 发送断电帧（关机脚本使用，手工执行会立刻断电）",
+        parents=[common],
+    ).add_argument("--dry-run", action="store_true", help="只打印帧和候选端口")
+
     tray_parser = sub.add_parser(
         "tray-test", help="只测试状态栏图标（不需要 MCU）", parents=[common]
     )
@@ -1333,6 +1377,7 @@ HANDLERS = {
     "rotate-lock": cmd_rotate_lock,
     "rotate-apply-saved": cmd_rotate_apply_saved,
     "screen": cmd_screen,
+    "cutoff": cmd_cutoff,
     "brightness": cmd_brightness,
     "power-dialog": cmd_power_dialog,
     "test-rotate": cmd_test_rotate,

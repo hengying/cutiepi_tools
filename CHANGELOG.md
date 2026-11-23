@@ -2,6 +2,36 @@
 
 All notable changes to this project are documented here.
 
+## v1.4.3 — 2026-11-23
+
+### Fixed
+
+- **Shutdown hook could not run on a fresh Raspberry Pi OS.** The hook was a Python
+  script importing `cutiepi_hud` from `/opt`, but at the very end of shutdown this
+  image switches the root filesystem over to the initramfs (plymouth), where neither
+  Python nor `/opt` exists — the hook failed silently, so the battery was never cut.
+  It is now a **self-contained POSIX shell script**, and the installer also copies it
+  into the initramfs via `/etc/initramfs-tools/hooks/cutiepi-hud-cutoff`.
+- **Cutoff frame dropped a byte.** Sending the frame through a shell variable
+  (`FRAME=$(printf '…')`) loses the `NUL` byte in the payload, producing a 6-byte
+  frame the MCU ignores. The hook now writes the bytes straight to the device and
+  loops (like the official `cutoff` helper) instead of sending them three times.
+
+### Added
+
+- `cutiepi-hud cutoff [--dry-run]` — send (or just print) the MCU cutoff frame, useful
+  for checking the serial plumbing.
+- The hook writes a line to `/var/log/cutiepi-hud-cutoff.log` on every run, so it is
+  possible to tell whether it was executed at all.
+
+### Documentation
+
+- Both READMEs and `docs/protocol.md` now document that **`poweroff` cuts the battery
+  but `halt` does not**: the panel menu's *Shutdown* runs `/sbin/shutdown -h now`
+  (halt), the SoC stays powered and the MCU therefore never cuts. Power button
+  double-press / 6-second hold both end in `systemctl poweroff` and do cut. The
+  README includes an optional `/sbin/shutdown` wrapper that maps `-h` to `-P`.
+
 ## v1.4.2 — 2026-11-23
 
 ### Added

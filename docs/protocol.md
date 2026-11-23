@@ -128,18 +128,41 @@ The panel (`wf-panel-pi`) is a StatusNotifierItem host. What actually works:
 
 ## 5. Why a shutdown hook
 
-A normal `systemctl poweroff` (or `halt`, or the desktop menu) otherwise leaves the
-MCU powered: the tablet appears off, but the battery is still connected and the MCU
-keeps drawing current. The official image solved this with a `cutoff` helper run
-from a shutdown hook; this project does the same:
+A normal `systemctl poweroff` otherwise leaves the MCU powered: the tablet appears
+off, but the battery is still connected and the MCU keeps drawing current. The
+official image solved this with a `cutoff` helper run from a shutdown hook; this
+project does the same:
 
 ```
 /usr/lib/systemd/system-shutdown/cutiepi-hud-cutoff
 ```
 
 systemd calls it as the very last step, with `poweroff`, `reboot`, `halt` or
-`kexec` as `$1`. The script sends the `type=5` frame three times (`F7`) — and skips
-`reboot` on purpose, because a reboot must not disconnect the battery.
+`kexec` as `$1`. The official helper is a shell script that loops
+`echo -e '\x5A\xA5\x05\x01\x00\xF7\xFC' >/dev/ttyS0` forever; this project's hook
+does the same (looping `printf` straight to the device, no termios fiddling) and
+skips `reboot`, because a reboot must not disconnect the battery.
 
-`CUTIEPI_HUD_CUTOFF_DRYRUN=1` prints the frame and the ports it would use instead of
-sending it, which is handy for checking the plumbing without powering anything off.
+Two findings from getting this to actually cut power on a fresh Raspberry Pi OS:
+
+* **The hook must be self-contained shell.** Raspberry Pi OS with plymouth switches
+  the root filesystem over to the initramfs at the very end of shutdown. A Python
+  hook that imports a package from `/opt` cannot run there — it fails silently, which
+  looks exactly like "the hook does not run". The installer therefore also copies the
+  script into the initramfs via `/etc/initramfs-tools/hooks/cutiepi-hud-cutoff`.
+* **Write the frame straight to the device, never through a shell variable.** A
+  command substitution (`FRAME=$(printf '\132\245\005\001\000\367\374')`) drops the
+  `NUL` byte in the payload, so the MCU receives a 6-byte frame with a valid-looking
+  CRC and ignores it.
+
+The battery is only cut when the shutdown really powers the SoC down. Verified on
+hardware:
+
+| request | runs | cuts power |
+|---|---|---|
+| `systemctl poweroff` | `poweroff.target` | yes |
+| `systemctl halt` / `/sbin/shutdown -h now` (panel menu) | `halt.target` | no — the SoC stays powered, the MCU has no reason to cut |
+
+`CUTIEPI_HUD_CUTOFF_DRYRUN=1` prints the frame instead of sending it, and
+`cutiepi-hud cutoff --dry-run` prints the frame plus the ports it would use — handy
+for checking the plumbing without powering anything off.

@@ -172,6 +172,21 @@ install -d -m 755 "$(dirname "$SHUTDOWN_HOOK")"
 install -m 755 "$SRC/shutdown-hook/cutiepi-hud-cutoff" "$SHUTDOWN_HOOK"
 log "已安装关机钩子 $SHUTDOWN_HOOK（关机时通知 MCU 断电）"
 
+# 关机最后阶段根文件系统可能已经切到 initramfs（Raspberry Pi OS + plymouth 会这样），
+# 那里既没有 python 也没有 /opt，所以把纯 shell 的钩子再复制一份进 initramfs。
+if [ -d /etc/initramfs-tools ]; then
+    install -m 755 "$SRC/shutdown-hook/cutiepi-hud-initramfs-hook" \
+        /etc/initramfs-tools/hooks/cutiepi-hud-cutoff
+    log "已安装 initramfs 钩子 /etc/initramfs-tools/hooks/cutiepi-hud-cutoff"
+    if command -v update-initramfs >/dev/null 2>&1; then
+        if update-initramfs -u -k all >/dev/null 2>&1; then
+            log "已重建 initramfs（断电钩子已包含进去）"
+        else
+            warn "initramfs 重建失败，断电钩子可能不会在关机最后阶段执行"
+        fi
+    fi
+fi
+
 # ---------------------------------------------------------------- sudoers
 if [ -f "$SRC/sudoers/cutiepi-hud" ]; then
     sed "s/__USER__/$TARGET_USER/g" "$SRC/sudoers/cutiepi-hud" > "$SUDOERS_FILE"

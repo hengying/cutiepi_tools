@@ -11,7 +11,8 @@
 * 状态栏上的**亮度图标**，点开是 1–15 的滑块；
 * **电源键处理**——短按开关屏幕、连按两下弹关机确认框、按住 6 秒响应 MCU 的关机请求
   （同样弹确认框）；
-* **干净断电**——`halt`/`poweroff` 结束时让平板真正切断电池，而不是被单片机硬切。
+* **干净断电**——`poweroff` 结束时让平板真正切断电池，而不是被单片机硬切；
+  （注意：面板菜单的「Shutdown」走的是 `halt`，不会断电——见下文）
 
 > **本项目由 [DeepSeek Harness](https://www.deepseek.com/) 驱动 DeepSeek-V4.1-Flash 1017
 > 模型端到端完成。** 协议逆向、真机联调、截图、测试和文档都在同一次 agent 会话里产出，
@@ -51,7 +52,7 @@
 | **状态栏亮度** | 太阳图标，点击弹出 1–15 滑块 | 独立进程里的第二个 SNI 图标；直接写 `/sys/class/backlight/*/brightness` |
 | **息屏 / 亮屏** | 短按电源键 | 写 `bl_power` |
 | **关机确认** | 全屏对话框，含「取消 / 关机」 | 连按两下电源键，或响应 MCU 的 6 秒请求 |
-| **真正断电** | 关机结束时电池被物理断开 | `systemd` 关机钩子给 MCU 发送断电帧 |
+| **真正断电** | `poweroff` 结束时电池被物理断开（`halt` 不会） | `systemd` 关机钩子给 MCU 发送断电帧，并复制进 initramfs |
 | **诊断** | `cutiepi-hud diagnose` 打印所有关键信息 | — |
 
 <p align="center">
@@ -83,7 +84,8 @@
 | MCU | `Ver0.1`，电量/充电/按键帧在 `/dev/serial0` 上每 1.00 秒一次 |
 
 下列内容全部在该设备上实测：四个方向旋转、充电与放电时的电量读数、亮度各档位、
-息屏开关、确认对话框，以及一次完整 `poweroff`（最后确实切断了电池供电）。
+息屏开关、确认对话框，以及 `poweroff` 结束时的真实断电（最后确实切断了电池供电）；
+同时确认了面板菜单的「Shutdown」（`halt`）**不会**断电。
 
 ---
 
@@ -138,7 +140,7 @@ sudo reboot
 * 安装并**启用** systemd 用户单元（登录自启）；
 * 安装 udev 规则：`video` 组可写背光、`dialout` 组可读 MCU 串口；
 * 安装 `sudoers.d` 规则：电源键关机不需要密码；
-* 安装关机钩子（通知 MCU 断电）；
+* 安装关机钩子（通知 MCU 断电），并把它复制进 initramfs（关机最后阶段根会切过去）；
 * 停用 `ttyS0` 上的串口控制台（它会吃掉 MCU 的帧）；
 * 给 `config.txt` 加 `avoid_warnings=2`（消掉欠压弹窗）；
 * 安装日志轮转规则。
@@ -211,6 +213,8 @@ cutiepi-hud brightness popup              # 直接弹滑块
 
 # ---- 电源 ----
 cutiepi-hud power-dialog                  # 预览关机确认框
+cutiepi-hud cutoff --dry-run              # 只打印断电帧，不碰硬件
+cutiepi-hud cutoff                        # 立刻发帧——会马上切断电池
 ```
 
 这些命令都可以在别的程序里安全调用：`screen` 和 `brightness` 成功返回 `0`，
@@ -303,13 +307,52 @@ systemd --user: cutiepi-hud run
   面板弹的 tooltip 气泡会一直挂着显示旧内容。切换反馈改用**2.5 秒的桌面通知**
   （`notify.py`），没有通知服务时退化成自绘小气泡（`toast.py`）。
 
+### 关机断电：`poweroff` 会断电，`halt` 不会
+
+关机钩子会给 MCU 发断电帧，但平板最后**是不是真的断电**，取决于关机是怎么发起的：
+
+| 关机方式 | 实际执行 | 会断电吗 |
+|---|---|---|
+| 电源键双击 → 确认框「关机」 | `sudo systemctl poweroff` | **会** |
+| 电源键按住 6 秒 → 确认框「关机」 | `sudo systemctl poweroff` | **会** |
+| 面板菜单「Shutdown」 | `/sbin/shutdown -h now` → **halt** | **不会** |
+| `sudo halt` | `halt.target` | **不会** |
+
+`poweroff` 会让 SoC 真正断电（PMIC 关掉核心电源），MCU 随之切断电池；`halt` 只是停
+CPU，SoC 仍带电待机，MCU 没有理由切电，只能长按 10 秒硬切。
+
+想让面板菜单也断电，可以把 `/sbin/shutdown`（原本是指向 `systemctl` 的软链）换成三行
+包装脚本，把 `-h` 映射成 `-P`：
+
+```sh
+sudo mv /sbin/shutdown /sbin/shutdown.orig
+sudo tee /sbin/shutdown >/dev/null <<'EOF'
+#!/bin/sh
+args=""
+for a in "$@"; do
+    case "$a" in
+        -h|--halt) args="$args -P" ;;
+        *) args="$args $a" ;;
+    esac
+done
+exec /usr/bin/systemctl $args
+EOF
+sudo chmod 755 /sbin/shutdown
+```
+
+钩子本身是**零依赖的 POSIX shell 脚本**（不用 Python、不依赖 `/opt`），安装时还会复制
+一份进 **initramfs**（`/etc/initramfs-tools/hooks/cutiepi-hud-cutoff`）。这一步是必需的：
+Raspberry Pi OS 带 plymouth 时，关机的最后阶段会把根文件系统切换到 initramfs，那时
+Python 版钩子根本跑不起来。它循环发送 `5A A5 05 01 00 F7 FC`，与官方 `cutoff` 脚本一致。
+
 最花时间的几个细节都写在 [`docs/protocol.md`](docs/protocol.md)：
 
 * MCU 帧格式与 1 秒节拍；
 * 电压 → 百分比曲线（与官方 shell 一致）；
 * 姿态 → 旋转角度的映射，以及为什么有些机器需要校准；
 * 面板真正认的 SNI 属性（`IconPixmap` 是网络字节序 ARGB）；
-* 为什么每个托盘图标要单独一个进程。
+* 为什么每个托盘图标要单独一个进程；
+* 为什么断电钩子必须放进 initramfs。
 
 ---
 
@@ -324,6 +367,7 @@ systemd --user: cutiepi-hud run
 | 亮度没反应 | `cutiepi-hud brightness 10`；失败说明 `video` 组不能写 `/sys/class/backlight/*/brightness`。 |
 | 关机框不出现 | `tail -f ~/cutiepi-hud.log`，日志里会记录按键值和对话框退出码。 |
 | 平板自己断电了 | 按住电源键 10 秒是 MCU 的硬件断电，软件拦不住。 |
+| **面板菜单关机后没断电** | 正常现象：菜单跑的是 `/sbin/shutdown -h now`（**halt**），`halt` 时 SoC 仍带电，MCU 不会切电。用双击/长按电源键的确认框（走 `systemctl poweroff`）或 `sudo systemctl poweroff`；想让菜单也断电，见「关机断电：`poweroff` 会断电，`halt` 不会」一节里的包装脚本。 |
 
 日志：`~/cutiepi-hud.log`（只记状态变化），由 `/etc/logrotate.d/cutiepi-hud` 每周轮转；
 `: > ~/cutiepi-hud.log` 可清空。
